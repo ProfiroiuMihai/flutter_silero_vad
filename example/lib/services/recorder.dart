@@ -18,13 +18,16 @@ class RecorderService {
   final sampleRate = 16000;
   final frameSize = 40; // 80ms
 
+  bool isInited = false;
+  bool isVadInited = false;
+
   /// サンプルあたりのビット数
   final int bitsPerSample = 16;
 
   /// チャンネル数
   final int numChannels = 1;
 
-  bool isInited = false;
+
 
   /// 直前の音声データを保存するための変数
   final lastAudioData = <int>[];
@@ -38,74 +41,116 @@ class RecorderService {
 
   final frameBuffer = <int>[];
 
+
   Future<void> init() async {
-    final status = await Permission.microphone.request();
-    if (status != PermissionStatus.granted) {
-      throw Exception('Microphone permission not granted');
+    try {
+      print('Initializing RecorderService...');
+      final status = await Permission.microphone.request();
+      if (status != PermissionStatus.granted) {
+        throw Exception('Microphone permission not granted');
+      }
+      print('Microphone permission granted');
+
+      final session = await AudioSession.instance;
+      await session.configure(AudioSessionConfiguration(
+        // ... (keep the existing configuration)
+      ));
+      print('AudioSession configured');
+
+      await onnxModelToLocal();
+      print('ONNX model copied to local storage');
+
+      isInited = true;
+      print('RecorderService initialized successfully');
+    } catch (e) {
+      print('Error initializing RecorderService: $e');
+      rethrow;
     }
-    final session = await AudioSession.instance;
-    await session.configure(
-      AudioSessionConfiguration(
-        avAudioSessionCategory: AVAudioSessionCategory.playAndRecord,
-        avAudioSessionCategoryOptions:
-            AVAudioSessionCategoryOptions.allowBluetooth |
-                AVAudioSessionCategoryOptions.defaultToSpeaker,
-        // iOSは voiceChat にすることで、エコーキャンセリングが有効になる
-        avAudioSessionMode: AVAudioSessionMode.voiceChat,
-        avAudioSessionRouteSharingPolicy:
-            AVAudioSessionRouteSharingPolicy.defaultPolicy,
-        avAudioSessionSetActiveOptions: AVAudioSessionSetActiveOptions.none,
-        androidAudioAttributes: const AndroidAudioAttributes(
-          contentType: AndroidAudioContentType.speech,
-          usage: AndroidAudioUsage.voiceCommunication,
-        ),
-        androidWillPauseWhenDucked: true,
-      ),
-    );
-    isInited = true;
+  }
+
+  Future<void> initVad() async {
+    if (!isVadInited) {
+      try {
+        print('Initializing VAD...');
+        await vad.initialize(
+          modelPath: await modelPath,
+          sampleRate: sampleRate,
+          frameSize: frameSize,
+          threshold: 0.7,
+          minSilenceDurationMs: 100,
+          speechPadMs: 0,
+        );
+        isVadInited = true;
+        print('VAD initialized successfully');
+      } catch (e) {
+        print('Error initializing VAD: $e');
+        rethrow;
+      }
+    }
   }
 
   Future<void> record(StreamController<List<int>> controller) async {
-    assert(isInited);
+    try {
+      assert(isInited);
+      print('Starting recording...');
 
-    await recorder.startRecording();
-    await onnxModelToLocal();
-    await vad.initialize(
-      modelPath: await modelPath,
-      sampleRate: sampleRate,
-      frameSize: frameSize,
-      threshold: 0.7,
-      minSilenceDurationMs: 100,
-      speechPadMs: 0,
-    );
-    recordingDataSubscription = recorder.audioStream.listen((buffer) async {
-      final data = _transformBuffer(buffer);
-      if (data.isEmpty) return;
-      frameBuffer.addAll(buffer);
-      while (frameBuffer.length >= frameSize * 2 * sampleRate ~/ 1000) {
-        final b = frameBuffer.take(frameSize * 2 * sampleRate ~/ 1000).toList();
-        frameBuffer.removeRange(0, frameSize * 2 * sampleRate ~/ 1000);
-        await _handleProcessedAudio(b);
-      }
-      controller.add(data);
-    });
+      await initVad();  // Ensure VAD is initialized before recording
 
-    processedAudioSubscription =
-        processedAudioStreamController.stream.listen((buffer) async {
-      final outputPath =
-          '${(await getApplicationDocumentsDirectory()).path}/output.wav';
-      saveAsWav(buffer, outputPath);
-      print('saved');
-    });
+      await recorder.startRecording();
+      print('AudioStreamer recording started');
+
+      recordingDataSubscription = recorder.audioStream.listen(
+            (buffer) async {
+          print('Received audio buffer of size: ${buffer.length}');
+          final data = _transformBuffer(buffer);
+          if (data.isEmpty) return;
+          frameBuffer.addAll(buffer);
+          while (frameBuffer.length >= frameSize * 2 * sampleRate ~/ 1000) {
+            final b = frameBuffer.take(frameSize * 2 * sampleRate ~/ 1000).toList();
+            frameBuffer.removeRange(0, frameSize * 2 * sampleRate ~/ 1000);
+            await _handleProcessedAudio(b);
+          }
+          controller.add(data);
+        },
+        onError: (error) {
+          print('Error in audio stream: $error');
+        },
+      );
+
+      processedAudioSubscription = processedAudioStreamController.stream.listen(
+            (buffer) async {
+          final outputPath = '${(await getApplicationDocumentsDirectory()).path}/output.wav';
+          saveAsWav(buffer, outputPath);
+          print('Audio saved to: $outputPath');
+        },
+        onError: (error) {
+          print('Error in processed audio stream: $error');
+        },
+      );
+
+      print('Recording started successfully');
+    } catch (e) {
+      print('Error starting recording: $e');
+      rethrow;
+    }
   }
 
   Future<void> stopRecorder() async {
-    await recorder.startRecording();
-    if (recordingDataSubscription != null) {
-      await recordingDataSubscription?.cancel();
-      recordingDataSubscription = null;
-      await processedAudioSubscription?.cancel();
-      processedAudioSubscription = null;
+    try {
+      print('Stopping recorder...');
+      await recorder.stopRecording();
+      if (recordingDataSubscription != null) {
+        await recordingDataSubscription?.cancel();
+        recordingDataSubscription = null;
+      }
+      if (processedAudioSubscription != null) {
+        await processedAudioSubscription?.cancel();
+        processedAudioSubscription = null;
+      }
+      print('Recorder stopped successfully');
+    } catch (e) {
+      print('Error stopping recorder: $e');
+      rethrow;
     }
   }
 
@@ -133,38 +178,59 @@ class RecorderService {
   static const bufferTimeInMilliseconds = 700;
   final audioDataBuffer = <int>[];
 
+
   Future<void> _handleProcessedAudio(List<int> buffer) async {
+    if (!isVadInited) {
+      print('VAD not initialized, skipping prediction');
+      return;
+    }
+
     final transformedBuffer = _transformBuffer(buffer);
     final transformedBufferFloat =
-        transformedBuffer.map((e) => e / 32768).toList();
+    transformedBuffer.map((e) => e / 32768).toList();
 
-    final isActivated =
-        await vad.predict(Float32List.fromList(transformedBufferFloat));
-    print(isActivated);
-    if (isActivated == true) {
-      lastActiveTime = DateTime.now();
-      audioDataBuffer.addAll(lastAudioData);
-      lastAudioData.clear();
-      audioDataBuffer.addAll(buffer);
-    } else if (lastActiveTime != null) {
-      audioDataBuffer.addAll(buffer);
-      print(DateTime.now().difference(lastActiveTime!));
-      // 一定時間経過したら音声データを保存する
-      if (DateTime.now().difference(lastActiveTime!) >
-          const Duration(milliseconds: bufferTimeInMilliseconds)) {
-        processedAudioStreamController.add([...audioDataBuffer]);
-        audioDataBuffer.clear();
-        lastActiveTime = null;
-      }
-    } else {
-      lastAudioData.addAll(buffer);
-      // 5秒分のデータを保存しておく
-      final threshold = sampleRate * 500 ~/ 1000;
-      if (lastAudioData.length > threshold) {
-        lastAudioData.removeRange(0, lastAudioData.length - threshold);
-      }
+    try {
+      final isActivated = await vad.predict(Float32List.fromList(transformedBufferFloat));
+      print('VAD prediction: $isActivated');
+      // ... (rest of the method)
+    } catch (e) {
+      print('Error in VAD prediction: $e');
     }
   }
+
+
+  // Future<void> _handleProcessedAudio(List<int> buffer) async {
+  //   final transformedBuffer = _transformBuffer(buffer);
+  //   final transformedBufferFloat =
+  //       transformedBuffer.map((e) => e / 32768).toList();
+  //
+  //   final isActivated =
+  //       await vad.predict(Float32List.fromList(transformedBufferFloat));
+  //   print(isActivated);
+  //   if (isActivated == true) {
+  //     lastActiveTime = DateTime.now();
+  //     audioDataBuffer.addAll(lastAudioData);
+  //     lastAudioData.clear();
+  //     audioDataBuffer.addAll(buffer);
+  //   } else if (lastActiveTime != null) {
+  //     audioDataBuffer.addAll(buffer);
+  //     print(DateTime.now().difference(lastActiveTime!));
+  //     // 一定時間経過したら音声データを保存する
+  //     if (DateTime.now().difference(lastActiveTime!) >
+  //         const Duration(milliseconds: bufferTimeInMilliseconds)) {
+  //       processedAudioStreamController.add([...audioDataBuffer]);
+  //       audioDataBuffer.clear();
+  //       lastActiveTime = null;
+  //     }
+  //   } else {
+  //     lastAudioData.addAll(buffer);
+  //     // 5秒分のデータを保存しておく
+  //     final threshold = sampleRate * 500 ~/ 1000;
+  //     if (lastAudioData.length > threshold) {
+  //       lastAudioData.removeRange(0, lastAudioData.length - threshold);
+  //     }
+  //   }
+  // }
 
   void saveAsWav(List<int> buffer, String filePath) {
     // PCMデータの変換
@@ -221,10 +287,20 @@ class RecorderService {
   }
 
   /// アセットからアプリケーションディレクトリにファイルをコピーする
+
   Future<void> onnxModelToLocal() async {
-    final data = await rootBundle.load('assets/silero_vad.v5.onnx');
-    final bytes =
-        data.buffer.asUint8List(data.offsetInBytes, data.lengthInBytes);
-    File(await modelPath).writeAsBytesSync(bytes);
+    try {
+      print('Copying ONNX model to local storage...');
+      final data = await rootBundle.load('assets/silero_vad.v4.onnx');
+      final bytes = data.buffer.asUint8List(
+          data.offsetInBytes, data.lengthInBytes);
+      final file = File(await modelPath);
+      await file.writeAsBytes(bytes);
+      print('ONNX model copied successfully. File size: ${file
+          .lengthSync()} bytes');
+    } catch (e) {
+      print('Error copying ONNX model: $e');
+      rethrow;
+    }
   }
-}
+  }
