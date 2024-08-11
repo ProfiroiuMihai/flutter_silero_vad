@@ -15,74 +15,71 @@ class HomePage extends HookConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final recorderService = ref.watch(recorderProvider);
     final isInitialized = useState(false);
-    final isListening = useState(false);
-    final errorMessage = useState<String?>(null);
-    final player = useMemoized(() => AudioPlayer(), []);
-    final isPlaying = useState(false);
-    final currentPlayingIndex = useState<int?>(-1);
+    final isRecording = useState(false);
+    final isPaused = useState(false);
+    final currentPlayingIndex = useState<int?>(null);
 
+    // Initialize the recorder service
     useEffect(() {
-      Future<void> initializeRecorder() async {
-        try {
-          await recorderService.init();
-          await recorderService.initVad();
-          isInitialized.value = true;
-        } catch (e) {
-          errorMessage.value = 'Error initializing: $e';
-        }
-      }
-
-      initializeRecorder();
-
-      return () {
-        recorderService.dispose();
-        player.dispose();
-      };
+      recorderService.init().then((_) {
+        isInitialized.value = true;
+      }).catchError((error) {
+        print('Error initializing recorder: $error');
+      });
+      return null;
     }, []);
 
+    // Listen for pause detection
+    useEffect(() {
+      final subscription = recorderService.pauseDetectedStream.listen((paused) {
+        isPaused.value = paused;
+      });
+      return subscription.cancel;
+    }, [recorderService]);
+
+    // Get the list of recordings
     final recordings = useStream(recorderService.recordingsStream).data ?? [];
 
-    Future<void> playRecording(String filePath, int index) async {
-      // ... (keep existing playRecording function)
+    // Audio player for playback
+    final player = useMemoized(() => AudioPlayer(), []);
+
+    // Function to toggle recording
+    Future<void> toggleRecording() async {
+      try {
+        await recorderService.toggleRecording();
+        isRecording.value = recorderService.isRecording;
+      } catch (e) {
+        print('Error toggling recording: $e');
+      }
     }
 
+    // Function to play/stop a recording
+    Future<void> playRecording(String filePath, int index) async {
+      if (currentPlayingIndex.value == index) {
+        await player.stop();
+        currentPlayingIndex.value = null;
+      } else {
+        await player.stop();
+        await player.play(DeviceFileSource(filePath));
+        currentPlayingIndex.value = index;
+        player.onPlayerComplete.listen((_) {
+          currentPlayingIndex.value = null;
+        });
+      }
+    }
+
+    // Function to share a recording
     Future<void> shareRecording(String filePath) async {
       try {
-        print('Attempting to share file: $filePath');
-        final file = File(filePath);
-        if (!await file.exists()) {
-          throw Exception('File does not exist');
-        }
-        print('File size: ${await file.length()} bytes');
-
-        final result = await Share.shareXFiles(
-          [XFile(filePath)],
-          text: 'Check out this audio recording!',
-        );
-
-        print('Share result: ${result.status}');
-        if (result.status == ShareResultStatus.success) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Shared successfully')),
-          );
-        } else {
-          throw Exception('Sharing failed: ${result.status}');
-        }
+        await Share.shareXFiles([XFile(filePath)], text: 'Check out this audio recording!');
       } catch (e) {
         print('Error sharing file: $e');
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Error sharing file: $e')),
-        );
       }
     }
 
     if (!isInitialized.value) {
       return Scaffold(
-        body: Center(
-          child: errorMessage.value != null
-              ? Text(errorMessage.value!)
-              : const CircularProgressIndicator(),
-        ),
+        body: Center(child: CircularProgressIndicator()),
       );
     }
 
@@ -96,6 +93,7 @@ class HomePage extends HookConsumerWidget {
               itemBuilder: (context, index) {
                 final filePath = recordings[index];
                 final fileName = path.basename(filePath);
+                final isPlaying = currentPlayingIndex.value == index;
                 return ListTile(
                   title: Text('Recording ${index + 1}'),
                   subtitle: Text(fileName),
@@ -103,11 +101,7 @@ class HomePage extends HookConsumerWidget {
                     mainAxisSize: MainAxisSize.min,
                     children: [
                       IconButton(
-                        icon: Icon(
-                          currentPlayingIndex.value == index && isPlaying.value
-                              ? Icons.stop
-                              : Icons.play_arrow,
-                        ),
+                        icon: Icon(isPlaying ? Icons.stop : Icons.play_arrow),
                         onPressed: () => playRecording(filePath, index),
                       ),
                       IconButton(
@@ -120,24 +114,23 @@ class HomePage extends HookConsumerWidget {
               },
             ),
           ),
-          if (errorMessage.value != null)
-            Text(errorMessage.value!, style: TextStyle(color: Colors.red)),
-          ElevatedButton(
-            onPressed: () async {
-              try {
-                if (isListening.value) {
-                  await recorderService.stopListening();
-                } else {
-                  await recorderService.startListening();
-                }
-                isListening.value = !isListening.value;
-                errorMessage.value = null;
-              } catch (e) {
-                errorMessage.value = 'Error: $e';
-                isListening.value = false;
-              }
-            },
-            child: Text(isListening.value ? 'Stop Listening' : 'Start Listening'),
+          if (isRecording.value)
+            Padding(
+              padding: const EdgeInsets.all(8.0),
+              child: Text(
+                isPaused.value ? 'Speech Paused' : 'Speech Detected',
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+              ),
+            ),
+          Padding(
+            padding: const EdgeInsets.all(16.0),
+            child: ElevatedButton(
+              onPressed: toggleRecording,
+              child: Text(isRecording.value ? 'Stop Recording' : 'Start Recording'),
+              style: ElevatedButton.styleFrom(
+                padding: EdgeInsets.symmetric(horizontal: 32, vertical: 16),
+              ),
+            ),
           ),
         ],
       ),
