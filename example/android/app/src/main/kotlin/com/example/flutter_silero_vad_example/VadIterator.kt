@@ -73,6 +73,7 @@ class VadIterator constructor(
 
 
     public fun predict(data: FloatArray): Boolean {
+        println("Predicting with data size: ${data.size}")
         var result = false;
         val inputOrt =
             OnnxTensor.createTensor(env, FloatBuffer.wrap(data), longArrayOf(1, windowSizeSamples));

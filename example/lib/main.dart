@@ -7,7 +7,7 @@ import 'providers/recorder.dart';
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   final container = ProviderContainer();
-  await container.read(recoderProvider).init();
+  await container.read(recorderProvider).init();
   runApp(
     UncontrolledProviderScope(
       container: container,
